@@ -195,6 +195,8 @@ export default function App() {
       setActiveSignal(result);
       if (activeTab === 'pine' || activeTab === 'matrix') {
         setActiveTab('bot');
+      } else if (activeTab === 'tradingview') {
+        setActiveTab('split');
       }
     } finally {
       setIsScanning(false);

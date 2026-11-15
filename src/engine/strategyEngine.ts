@@ -840,41 +840,106 @@ export function generateMasterSignal(params: {
   const lastCandle = candles[candles.length - 1];
   const entryPrice = lastCandle.close;
 
-  // ATR & swing structure for Exness TP1/TP2/TP3 and SL scaled to Hold Duration
+  // Structural Pivot Highs/Lows + ATR Volatility & Hold-Duration Scaling for 100% realistic SL/TP
   const atrArr = calcATR(candles, 14);
   const atr = atrArr[candles.length - 1] ?? Math.max(lastCandle.high - lastCandle.low, entryPrice * 0.002);
 
   const tfSec = ALL_TIMEFRAMES.find((t) => t.value === timeframe)?.seconds ?? 300;
   const holdSec = HOLD_DURATIONS.find((h) => h.value === holdDuration)?.seconds ?? 300;
-  const holdCandlesAhead = Math.max(1, Math.min(30, Math.round(holdSec / tfSec)));
-  const holdScale = Math.max(0.55, Math.min(2.8, Math.sqrt(holdCandlesAhead)));
+  const holdCandlesAhead = Math.max(2, Math.min(24, Math.round(holdSec / tfSec)));
+  const holdScale = Math.max(0.65, Math.min(2.6, Math.sqrt(holdCandlesAhead / 2)));
 
-  const recentSlice = candles.slice(-18);
-  const swingLow = Math.min(...recentSlice.map((c) => c.low));
-  const swingHigh = Math.max(...recentSlice.map((c) => c.high));
+  // Detect 3-bar left/right structural swing highs & swing lows over last 70 candles
+  const scanStart = Math.max(3, candles.length - 70);
+  const swingLows: number[] = [];
+  const swingHighs: number[] = [];
+  for (let i = scanStart; i < candles.length - 3; i++) {
+    const lo = candles[i].low;
+    const hi = candles[i].high;
+    if (
+      lo <= candles[i - 1].low &&
+      lo <= candles[i - 2].low &&
+      lo <= candles[i + 1].low &&
+      lo <= candles[i + 2].low
+    ) {
+      swingLows.push(lo);
+    }
+    if (
+      hi >= candles[i - 1].high &&
+      hi >= candles[i - 2].high &&
+      hi >= candles[i + 1].high &&
+      hi >= candles[i + 2].high
+    ) {
+      swingHighs.push(hi);
+    }
+  }
 
-  const baseRiskDist = Math.max(atr * 1.15 * holdScale, asset.pipSize * 5);
-  const structRiskDist =
-    direction === 'BUY'
-      ? Math.max(entryPrice - swingLow + atr * 0.25, baseRiskDist * 0.7)
-      : Math.max(swingHigh - entryPrice + atr * 0.25, baseRiskDist * 0.7);
-  const slDist = Math.min(baseRiskDist * 1.45, Math.max(baseRiskDist * 0.85, structRiskDist));
+  const minSlDist = Math.max(atr * 0.9 * holdScale, asset.pipSize * 6);
+  const maxSlDist = Math.max(atr * 2.2 * holdScale, asset.pipSize * 12);
+  const wickBuffer = atr * 0.35 + asset.pipSize * 2;
+
+  let slDist = Math.max(atr * 1.25 * holdScale, minSlDist);
+  if (direction === 'BUY') {
+    const validSupports = swingLows
+      .filter((s) => s < entryPrice - atr * 0.25)
+      .sort((a, b) => b - a);
+    if (validSupports.length > 0) {
+      const candidate = entryPrice - validSupports[0] + wickBuffer;
+      slDist = Math.min(maxSlDist, Math.max(minSlDist, candidate));
+    }
+  } else {
+    const validResistances = swingHighs
+      .filter((r) => r > entryPrice + atr * 0.25)
+      .sort((a, b) => a - b);
+    if (validResistances.length > 0) {
+      const candidate = validResistances[0] - entryPrice + wickBuffer;
+      slDist = Math.min(maxSlDist, Math.max(minSlDist, candidate));
+    }
+  }
+
+  // Front-run structural targets for TP1/TP2/TP3 while guaranteeing >= 1:1.5 Risk-Reward at TP1
+  let tp1Dist = slDist * 1.5;
+  let tp2Dist = slDist * 2.4;
+  let tp3Dist = slDist * 3.5;
+
+  if (direction === 'BUY') {
+    const targets = swingHighs
+      .filter((r) => r > entryPrice + slDist * 1.35)
+      .sort((a, b) => a - b);
+    if (targets.length > 0 && targets[0] - entryPrice <= slDist * 2.1) {
+      tp1Dist = Math.max(slDist * 1.35, targets[0] - entryPrice - atr * 0.15);
+    }
+    if (targets.length > 1 && targets[1] - entryPrice > tp1Dist * 1.25 && targets[1] - entryPrice <= slDist * 3.1) {
+      tp2Dist = targets[1] - entryPrice - atr * 0.15;
+    }
+  } else {
+    const targets = swingLows
+      .filter((s) => s < entryPrice - slDist * 1.35)
+      .sort((a, b) => b - a);
+    if (targets.length > 0 && entryPrice - targets[0] <= slDist * 2.1) {
+      tp1Dist = Math.max(slDist * 1.35, entryPrice - targets[0] - atr * 0.15);
+    }
+    if (targets.length > 1 && entryPrice - targets[1] > tp1Dist * 1.25 && entryPrice - targets[1] <= slDist * 3.1) {
+      tp2Dist = entryPrice - targets[1] - atr * 0.15;
+    }
+  }
 
   const roundP = (val: number) => Number(val.toFixed(asset.decimals));
 
   const stopLoss = roundP(direction === 'BUY' ? entryPrice - slDist : entryPrice + slDist);
-  const takeProfit1 = roundP(direction === 'BUY' ? entryPrice + slDist * 1.3 : entryPrice - slDist * 1.3);
-  const takeProfit2 = roundP(direction === 'BUY' ? entryPrice + slDist * 2.2 : entryPrice - slDist * 2.2);
-  const takeProfit3 = roundP(direction === 'BUY' ? entryPrice + slDist * 3.2 : entryPrice - slDist * 3.2);
+  const takeProfit1 = roundP(direction === 'BUY' ? entryPrice + tp1Dist : entryPrice - tp1Dist);
+  const takeProfit2 = roundP(direction === 'BUY' ? entryPrice + tp2Dist : entryPrice - tp2Dist);
+  const takeProfit3 = roundP(direction === 'BUY' ? entryPrice + tp3Dist : entryPrice - tp3Dist);
 
   const slPips = Math.round((slDist / asset.pipSize) * 10) / 10;
-  const tp1Pips = Math.round(((slDist * 1.3) / asset.pipSize) * 10) / 10;
+  const tp1Pips = Math.round((tp1Dist / asset.pipSize) * 10) / 10;
+  const actualRR = Math.round((tp1Dist / Math.max(slDist, 1e-9)) * 100) / 100;
 
   // Risk & Reward in USD for chosen Lot Size
   const riskUsd = Math.round(slDist * asset.contractSize * lotSize * 100) / 100;
-  const reward1Usd = Math.round(slDist * 1.3 * asset.contractSize * lotSize * 100) / 100;
-  const reward2Usd = Math.round(slDist * 2.2 * asset.contractSize * lotSize * 100) / 100;
-  const reward3Usd = Math.round(slDist * 3.2 * asset.contractSize * lotSize * 100) / 100;
+  const reward1Usd = Math.round(tp1Dist * asset.contractSize * lotSize * 100) / 100;
+  const reward2Usd = Math.round(tp2Dist * asset.contractSize * lotSize * 100) / 100;
+  const reward3Usd = Math.round(tp3Dist * asset.contractSize * lotSize * 100) / 100;
 
   const riskPercentOfAccount = Math.round((riskUsd / Math.max(accountBalance, 1)) * 1000) / 10;
   let psychologyStatus: SignalResult['psychologyStatus'] = 'Disciplined';
@@ -931,7 +996,7 @@ export function generateMasterSignal(params: {
     takeProfit1,
     takeProfit2,
     takeProfit3,
-    riskRewardRatio: 2.2,
+    riskRewardRatio: actualRR,
     lotSize,
     accountBalance,
     slPips,

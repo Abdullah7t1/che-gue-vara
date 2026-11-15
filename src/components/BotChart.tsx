@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  BaselineSeries,
   CandlestickSeries,
   ColorType,
   createChart,
@@ -59,7 +60,8 @@ export const BotChart: React.FC<BotChartProps> = ({
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
-  const extraSeriesRef = useRef<ISeriesApi<'Line' | 'Histogram'>[]>([]);
+  const extraSeriesRef = useRef<ISeriesApi<'Line' | 'Histogram' | 'Baseline'>[]>([]);
+  const lastSignalIdRef = useRef<string | null>(null);
   const [hoverBar, setHoverBar] = useState<Candle | null>(null);
 
   // Initialize TradingView Lightweight Charts engine once
@@ -85,13 +87,13 @@ export const BotChart: React.FC<BotChartProps> = ({
       },
       rightPriceScale: {
         borderColor: '#1E2633',
-        scaleMargins: { top: 0.1, bottom: 0.2 },
+        scaleMargins: { top: 0.12, bottom: 0.2 },
       },
       timeScale: {
         borderColor: '#1E2633',
         timeVisible: true,
         secondsVisible: timeframe.endsWith('s'),
-        rightOffset: 16,
+        rightOffset: 18,
       },
       width: el.clientWidth,
       height: el.clientHeight,
@@ -112,7 +114,7 @@ export const BotChart: React.FC<BotChartProps> = ({
       priceScaleId: '',
     });
     volumeSeries.priceScale().applyOptions({
-      scaleMargins: { top: 0.84, bottom: 0 },
+      scaleMargins: { top: 0.85, bottom: 0 },
     });
 
     const markersPlugin = createSeriesMarkers(candleSeries, []);
@@ -168,12 +170,12 @@ export const BotChart: React.FC<BotChartProps> = ({
       timeScale: {
         timeVisible: true,
         secondsVisible: timeframe.endsWith('s'),
-        rightOffset: 16,
+        rightOffset: 18,
       },
     });
   }, [timeframe]);
 
-  // Sync Candles, Volume, Pine Scripts, Markers, TP/SL Lines, and Holding Target Zone
+  // Sync Candles, Volume, Pine Scripts, Markers, Shaded SL/TP Zones & Hold Trajectory
   useEffect(() => {
     const chart = chartRef.current;
     const candleSeries = candleSeriesRef.current;
@@ -183,7 +185,6 @@ export const BotChart: React.FC<BotChartProps> = ({
       return;
     }
 
-    // Apply precision formatting to candle series
     candleSeries.applyOptions({
       priceFormat: {
         type: 'price',
@@ -209,7 +210,7 @@ export const BotChart: React.FC<BotChartProps> = ({
     candleSeries.setData(candleData);
     volumeSeries.setData(volumeData);
 
-    // Clear previous extra series (Pine plots + Hold target projection line)
+    // Clear previous extra series (Pine plots + SL/TP shaded zones + Hold trajectory)
     for (const s of extraSeriesRef.current) {
       try {
         chart.removeSeries(s);
@@ -229,7 +230,7 @@ export const BotChart: React.FC<BotChartProps> = ({
     }
     priceLinesRef.current = [];
 
-    // 1. Render Compiled Pine Script Plots & HLines directly onto the TradingView chart
+    // 1. Render Compiled Pine Script Plots directly onto the TradingView chart
     let nonOverlayPaneIdx = 1;
     for (const pr of pineResults) {
       const targetPane = pr.isOverlay ? 0 : nonOverlayPaneIdx++;
@@ -266,7 +267,7 @@ export const BotChart: React.FC<BotChartProps> = ({
       }
     }
 
-    // 2. Collect all Chart Markers (Candlestick Patterns, Every-5-Candle Auto Signals, Pine Script Entries, Active Signal)
+    // 2. Collect all Chart Markers (Candlestick Patterns, Every-5-Candle Auto Signals, Pine Script Entries)
     const markers: SeriesMarker<Time>[] = [];
 
     if (showPatternMarkers) {
@@ -313,18 +314,92 @@ export const BotChart: React.FC<BotChartProps> = ({
       }
     }
 
-    // 3. Render Active Signal TP1/TP2/TP3, SL, Entry, and Holding Target Zone on chart!
+    // 3. Render Active Signal Shaded TP Zone (Green) + Shaded SL Zone (Red) + TP1/TP2/TP3/SL Lines + Hold Target Path!
     const lastBar = candles[candles.length - 1];
     if (activeSignal && activeSignal.tvSymbol === asset.tvSymbol) {
       const isBuy = activeSignal.direction === 'BUY';
-      const entryTime = lastBar.time as UTCTimestamp;
+
+      // Find nearest candle timestamp matching the signal entry, or default to latest bar
+      const signalTimeSec = Math.floor(activeSignal.timestamp / 1000);
+      let entryIdx = candles.length - 1;
+      for (let i = candles.length - 1; i >= Math.max(0, candles.length - 30); i--) {
+        if (candles[i].time <= signalTimeSec) {
+          entryIdx = i;
+          break;
+        }
+      }
+      const entryBarTime = candles[entryIdx].time;
+      const barStep =
+        candles.length >= 2
+          ? Math.max(1, candles[candles.length - 1].time - candles[candles.length - 2].time)
+          : 60;
+      const spanBars = Math.max(3, activeSignal.holdCandlesAhead);
+
+      const zoneTimes: UTCTimestamp[] = [];
+      for (let step = 0; step <= spanBars; step++) {
+        zoneTimes.push((entryBarTime + step * barStep) as UTCTimestamp);
+      }
+      const holdEndTime = zoneTimes[zoneTimes.length - 1];
+
+      // TradingView-style Green Profit Shaded Box (Entry -> TP1)
+      const tpZoneSeries = chart.addSeries(BaselineSeries, {
+        baseValue: { type: 'price', price: activeSignal.entryPrice },
+        topLineColor: isBuy ? 'rgba(16, 185, 129, 0.95)' : 'rgba(16, 185, 129, 0)',
+        topFillColor1: isBuy ? 'rgba(16, 185, 129, 0.24)' : 'rgba(16, 185, 129, 0)',
+        topFillColor2: isBuy ? 'rgba(16, 185, 129, 0.08)' : 'rgba(16, 185, 129, 0)',
+        bottomLineColor: !isBuy ? 'rgba(16, 185, 129, 0.95)' : 'rgba(16, 185, 129, 0)',
+        bottomFillColor1: !isBuy ? 'rgba(16, 185, 129, 0.08)' : 'rgba(16, 185, 129, 0)',
+        bottomFillColor2: !isBuy ? 'rgba(16, 185, 129, 0.24)' : 'rgba(16, 185, 129, 0)',
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+      tpZoneSeries.setData(
+        zoneTimes.map((t) => ({ time: t, value: activeSignal.takeProfit1 }))
+      );
+      extraSeriesRef.current.push(tpZoneSeries);
+
+      // TradingView-style Red Risk Shaded Box (Entry -> SL)
+      const slZoneSeries = chart.addSeries(BaselineSeries, {
+        baseValue: { type: 'price', price: activeSignal.entryPrice },
+        topLineColor: !isBuy ? 'rgba(239, 68, 68, 0.95)' : 'rgba(239, 68, 68, 0)',
+        topFillColor1: !isBuy ? 'rgba(239, 68, 68, 0.22)' : 'rgba(239, 68, 68, 0)',
+        topFillColor2: !isBuy ? 'rgba(239, 68, 68, 0.08)' : 'rgba(239, 68, 68, 0)',
+        bottomLineColor: isBuy ? 'rgba(239, 68, 68, 0.95)' : 'rgba(239, 68, 68, 0)',
+        bottomFillColor1: isBuy ? 'rgba(239, 68, 68, 0.08)' : 'rgba(239, 68, 68, 0)',
+        bottomFillColor2: isBuy ? 'rgba(239, 68, 68, 0.22)' : 'rgba(239, 68, 68, 0)',
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+      slZoneSeries.setData(
+        zoneTimes.map((t) => ({ time: t, value: activeSignal.stopLoss }))
+      );
+      extraSeriesRef.current.push(slZoneSeries);
+
+      // Projected Holding Target Path (Entry -> Hold Expiry TP1)
+      const projSeries = chart.addSeries(LineSeries, {
+        color: '#F59E0B',
+        lineWidth: 2,
+        lineStyle: LineStyle.Dashed,
+        lastValueVisible: false,
+        priceLineVisible: false,
+        title: `Hold Target (${activeSignal.holdDuration})`,
+      });
+      projSeries.setData([
+        { time: entryBarTime as UTCTimestamp, value: activeSignal.entryPrice },
+        { time: holdEndTime, value: activeSignal.takeProfit1 },
+      ]);
+      extraSeriesRef.current.push(projSeries);
 
       markers.push({
-        time: entryTime,
+        time: entryBarTime as UTCTimestamp,
         position: isBuy ? 'belowBar' : 'aboveBar',
         color: isBuy ? '#10B981' : '#DC2626',
         shape: isBuy ? 'arrowUp' : 'arrowDown',
-        text: `${activeSignal.direction} NOW · HOLD ${activeSignal.holdDuration}`,
+        text: `${activeSignal.direction} @ ${activeSignal.entryPrice.toFixed(asset.decimals)} · HOLD ${activeSignal.holdDuration}`,
       });
 
       // Entry Price Line
@@ -347,7 +422,7 @@ export const BotChart: React.FC<BotChartProps> = ({
           lineWidth: 2,
           lineStyle: LineStyle.Dashed,
           axisLabelVisible: true,
-          title: `SL (-$${activeSignal.riskUsd.toFixed(0)})`,
+          title: `SL (-$${activeSignal.riskUsd.toFixed(2)})`,
         })
       );
 
@@ -359,7 +434,7 @@ export const BotChart: React.FC<BotChartProps> = ({
           lineWidth: 2,
           lineStyle: LineStyle.Dashed,
           axisLabelVisible: true,
-          title: `TP1 HOLD ${activeSignal.holdDuration} (+$${activeSignal.reward1Usd.toFixed(0)})`,
+          title: `TP1 (${activeSignal.holdDuration} +$${activeSignal.reward1Usd.toFixed(2)})`,
         })
       );
 
@@ -371,7 +446,7 @@ export const BotChart: React.FC<BotChartProps> = ({
           lineWidth: 1,
           lineStyle: LineStyle.Dotted,
           axisLabelVisible: true,
-          title: `TP2 (+$${activeSignal.reward2Usd.toFixed(0)})`,
+          title: `TP2 (+$${activeSignal.reward2Usd.toFixed(2)})`,
         })
       );
       priceLinesRef.current.push(
@@ -381,27 +456,20 @@ export const BotChart: React.FC<BotChartProps> = ({
           lineWidth: 1,
           lineStyle: LineStyle.Dotted,
           axisLabelVisible: true,
-          title: `TP3 (+$${activeSignal.reward3Usd.toFixed(0)})`,
+          title: `TP3 (+$${activeSignal.reward3Usd.toFixed(2)})`,
         })
       );
 
-      // Visual Holding Target Projection Path on future timestamps
-      const barStep =
-        candles.length >= 2 ? Math.max(1, candles[candles.length - 1].time - candles[candles.length - 2].time) : 60;
-      const futureTime = (lastBar.time + barStep * Math.max(2, activeSignal.holdCandlesAhead)) as UTCTimestamp;
-      const projSeries = chart.addSeries(LineSeries, {
-        color: '#F59E0B',
-        lineWidth: 2,
-        lineStyle: LineStyle.Dashed,
-        lastValueVisible: false,
-        priceLineVisible: false,
-        title: `Hold Target (${activeSignal.holdDuration})`,
-      });
-      projSeries.setData([
-        { time: entryTime, value: activeSignal.entryPrice },
-        { time: futureTime, value: activeSignal.takeProfit1 },
-      ]);
-      extraSeriesRef.current.push(projSeries);
+      // Scroll cleanly into view when a new signal is generated
+      if (lastSignalIdRef.current !== activeSignal.id) {
+        lastSignalIdRef.current = activeSignal.id;
+        chart.timeScale().applyOptions({
+          rightOffset: Math.max(16, spanBars + 6),
+        });
+        chart.timeScale().scrollToRealTime();
+      }
+    } else if (lastBar) {
+      lastSignalIdRef.current = null;
     }
 
     markers.sort((a, b) => Number(a.time) - Number(b.time));
@@ -417,14 +485,39 @@ export const BotChart: React.FC<BotChartProps> = ({
     pineResults,
   ]);
 
-  const latest = hoverBar ?? candles[candles.length - 1];
+  const currentBar = candles[candles.length - 1];
+  const latest = hoverBar ?? currentBar;
   const isUp = latest ? latest.close >= latest.open : true;
+
+  // Compute live floating P/L for active signal
+  let floatingPips = 0;
+  let floatingUsd = 0;
+  let tradeState: 'RUNNING' | 'TP1 HIT' | 'SL HIT' = 'RUNNING';
+  if (activeSignal && activeSignal.tvSymbol === asset.tvSymbol && currentBar) {
+    const diff =
+      activeSignal.direction === 'BUY'
+        ? currentBar.close - activeSignal.entryPrice
+        : activeSignal.entryPrice - currentBar.close;
+    floatingPips = Math.round((diff / asset.pipSize) * 10) / 10;
+    floatingUsd = Math.round(diff * asset.contractSize * activeSignal.lotSize * 100) / 100;
+    if (
+      (activeSignal.direction === 'BUY' && currentBar.close >= activeSignal.takeProfit1) ||
+      (activeSignal.direction === 'SELL' && currentBar.close <= activeSignal.takeProfit1)
+    ) {
+      tradeState = 'TP1 HIT';
+    } else if (
+      (activeSignal.direction === 'BUY' && currentBar.close <= activeSignal.stopLoss) ||
+      (activeSignal.direction === 'SELL' && currentBar.close >= activeSignal.stopLoss)
+    ) {
+      tradeState = 'SL HIT';
+    }
+  }
 
   return (
     <div className="relative flex-1 min-h-[420px] bg-[#0A0D12] select-none">
       {/* Live OHLCV & Active Signal HUD */}
-      <div className="absolute top-3 left-3 z-10 pointer-events-none flex flex-col gap-1">
-        <div className="flex flex-wrap items-center gap-3 text-[12px] bg-[#0D1117]/85 backdrop-blur-sm px-2.5 py-1 rounded border border-[#1E2633]">
+      <div className="absolute top-3 left-3 z-10 pointer-events-none flex flex-col gap-1.5">
+        <div className="flex flex-wrap items-center gap-3 text-[12px] bg-[#0D1117]/90 backdrop-blur-sm px-2.5 py-1 rounded border border-[#1E2633]">
           <span className="font-semibold text-[#F8FAFC]">{asset.tvSymbol}</span>
           <span className="text-[#64748B]">·</span>
           <span className="text-[#94A3B8]">{timeframe}</span>
@@ -447,7 +540,7 @@ export const BotChart: React.FC<BotChartProps> = ({
         </div>
 
         {activeSignal && activeSignal.tvSymbol === asset.tvSymbol && (
-          <div className="flex items-center gap-3 text-[11px] bg-[#0D1117]/90 px-2.5 py-1 rounded border border-[#1E2633] tabular-nums">
+          <div className="flex flex-wrap items-center gap-2.5 text-[11px] bg-[#0D1117]/95 px-2.5 py-1.5 rounded border border-[#1E2633] tabular-nums">
             <span
               className={`font-semibold ${
                 activeSignal.direction === 'BUY' ? 'text-[#10B981]' : 'text-[#EF4444]'
@@ -455,13 +548,27 @@ export const BotChart: React.FC<BotChartProps> = ({
             >
               {activeSignal.direction} @ {activeSignal.entryPrice.toFixed(asset.decimals)}
             </span>
-            <span className="text-[#64748B]">·</span>
+            <span className="text-[#475569]">·</span>
             <span className="text-[#F59E0B]">
               Hold {activeSignal.holdDuration} (~{activeSignal.holdCandlesAhead} bars)
             </span>
-            <span className="text-[#64748B]">·</span>
+            <span className="text-[#475569]">·</span>
             <span className="text-[#10B981]">TP1 {activeSignal.takeProfit1.toFixed(asset.decimals)}</span>
             <span className="text-[#EF4444]">SL {activeSignal.stopLoss.toFixed(asset.decimals)}</span>
+            <span className="text-[#475569]">·</span>
+            <span className="text-[#94A3B8]">R:R 1:{activeSignal.riskRewardRatio}</span>
+            <span className="text-[#475569]">·</span>
+            <span
+              className={`font-semibold ${
+                tradeState === 'TP1 HIT' || floatingUsd > 0
+                  ? 'text-[#10B981]'
+                  : tradeState === 'SL HIT' || floatingUsd < 0
+                  ? 'text-[#EF4444]'
+                  : 'text-[#94A3B8]'
+              }`}
+            >
+              {tradeState} ({floatingUsd >= 0 ? '+' : ''}${floatingUsd.toFixed(2)} / {floatingPips >= 0 ? '+' : ''}{floatingPips}p)
+            </span>
           </div>
         )}
       </div>

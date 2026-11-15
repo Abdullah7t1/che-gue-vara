@@ -210,7 +210,7 @@ export const ExecutionPanel: React.FC<ExecutionPanelProps> = ({
           {/* Hold Duration & Countdown */}
           <div className="flex items-center justify-between text-[12px] py-2 px-3 rounded bg-[#131922] border border-[#1E2633] tabular-nums">
             <span className="text-[#94A3B8]">
-              Hold Target ({signal.holdDuration})
+              Hold {signal.holdDuration} · R:R 1:{signal.riskRewardRatio}
             </span>
             <span className="font-mono font-semibold text-[#F59E0B]">
               {secondsLeft > 0 ? formatCountdown(secondsLeft) : 'Target Reached'}
