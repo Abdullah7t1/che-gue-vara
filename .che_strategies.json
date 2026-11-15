@@ -1,0 +1,18 @@
+[
+  {
+    "id": "che_ema_ribbon",
+    "name": "Che EMA 9/21 Scalper",
+    "enabled": true,
+    "isOverlay": true,
+    "createdAt": 1794648663723,
+    "code": "//@version=5\nstrategy(\"Che EMA 9/21 Scalper\", overlay=true)\nfastLen = input.int(9, \"Fast EMA\")\nslowLen = input.int(21, \"Slow EMA\")\nemaFast = ta.ema(close, fastLen)\nemaSlow = ta.ema(close, slowLen)\nplot(emaFast, title=\"EMA Fast\", color=color.green, linewidth=2)\nplot(emaSlow, title=\"EMA Slow\", color=color.red, linewidth=2)\nlongCond = ta.crossover(emaFast, emaSlow)\nshortCond = ta.crossunder(emaFast, emaSlow)\nif longCond\n    strategy.entry(\"Buy\", strategy.long)\nif shortCond\n    strategy.entry(\"Sell\", strategy.short)"
+  },
+  {
+    "id": "che_bb_mean_revert",
+    "name": "Bollinger 20/2.0 Institutional",
+    "enabled": false,
+    "isOverlay": true,
+    "createdAt": 1794691863723,
+    "code": "//@version=5\nindicator(\"Bollinger 20/2.0 Institutional\", overlay=true)\nlen = input.int(20, \"BB Length\")\nmult = input.float(2.0, \"Multiplier\")\n[middle, upper, lower] = ta.bb(close, len, mult)\nplot(upper, title=\"BB Upper\", color=color.amber, linewidth=1)\nplot(middle, title=\"BB Basis\", color=color.blue, linewidth=1)\nplot(lower, title=\"BB Lower\", color=color.amber, linewidth=1)"
+  }
+]

@@ -1,0 +1,6 @@
+{
+  "name": "Che Guevara Trading",
+  "description": "Live TradingView-connected quantitative trading terminal featuring 500+ strategy scanning, Gold-Silver cross-market analysis, Doji & Engulfing pattern recognition, Pine Script compiler, and Exness TP/SL execution guidance.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
